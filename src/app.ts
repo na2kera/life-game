@@ -9,14 +9,17 @@ import type {
   GameState,
   Player,
 } from './core/types.ts';
-import { InputHub, type InputButton } from './input/input.ts';
+import { GamepadSource, type PadInfo } from './input/gamepad.ts';
+import { InputHub, type DeviceKind, type InputButton } from './input/input.ts';
 import { KeyboardSource } from './input/keyboard.ts';
+import { MappingStore } from './input/mapping-store.ts';
 import { Dialog } from './ui/dialog.ts';
 import { CHOICE_TITLES, cardName, describeEvent } from './ui/format.ts';
 import { Hud, type HudModel } from './ui/hud.ts';
 import { Log } from './ui/log.ts';
 import { Prompt, type PromptChoice } from './ui/prompt.ts';
 import { ResultScreen } from './ui/result.ts';
+import { SettingsScreen } from './ui/settings.ts';
 import { TitleScreen } from './ui/title.ts';
 import { Assets } from './view/assets.ts';
 import { BoardView } from './view/board-view.ts';
@@ -25,7 +28,7 @@ import { PieceView, PLAYER_COLORS } from './view/piece-view.ts';
 import { RouletteView } from './view/roulette-view.ts';
 import { SceneView } from './view/scene.ts';
 
-type Mode = 'loading' | 'title' | 'game' | 'result';
+type Mode = 'loading' | 'title' | 'settings' | 'game' | 'result';
 
 /** 演出の途中経過を表す表示用の値（HUD 用） */
 type Display = Omit<HudModel, 'state'>;
@@ -40,12 +43,17 @@ export class App {
   private readonly data: GameData;
   private readonly sceneView: SceneView;
   private readonly input = new InputHub();
+  private readonly mappingStore = new MappingStore();
+  private readonly gamepad = new GamepadSource({ store: this.mappingStore });
   private readonly hud = new Hud(PLAYER_COLORS);
   private readonly log = new Log();
   private readonly prompt = new Prompt();
   private readonly dialog = new Dialog();
   private readonly title = new TitleScreen();
   private readonly result = new ResultScreen();
+  private readonly settings = new SettingsScreen(this.gamepad, this.mappingStore);
+  /** 接続中のパッド（接続・切断のログ用） */
+  private pads: PadInfo[] = [];
 
   private mode: Mode = 'loading';
   /** 演出中は入力を受け付けない */
@@ -64,8 +72,14 @@ export class App {
     this.data = data;
     this.sceneView = new SceneView(canvas);
     this.input.addSource(new KeyboardSource());
-    this.input.subscribe((b) => this.onInput(b));
-    this.sceneView.onFrame(() => this.input.update());
+    this.input.addSource(this.gamepad);
+    this.input.subscribe((b, device) => this.onInput(b, device));
+    this.input.onDeviceChange((device) => this.onDeviceChange(device));
+    this.gamepad.onDeviceChange((pads) => this.onPadsChange(pads));
+    this.sceneView.onFrame(() => {
+      this.input.update();
+      if (this.mode === 'settings') this.settings.update();
+    });
   }
 
   async start(): Promise<void> {
@@ -98,7 +112,17 @@ export class App {
     this.state = null;
     this.camera.follow(this.boardCenter);
     const { minPlayers, maxPlayers } = this.data.rules;
-    this.title.show(minPlayers, maxPlayers, (n) => void this.startGame(n));
+    this.title.show(
+      minPlayers,
+      maxPlayers,
+      (n) => void this.startGame(n),
+      () => this.showSettings(),
+    );
+  }
+
+  private showSettings(): void {
+    this.mode = 'settings';
+    this.settings.show(() => this.showTitle());
   }
 
   private async startGame(playerCount: number): Promise<void> {
@@ -140,11 +164,14 @@ export class App {
   // 入力
   // -------------------------------------------------------------------------
 
-  private onInput(button: InputButton): void {
+  private onInput(button: InputButton, device?: DeviceKind): void {
     if (this.busy) return;
     switch (this.mode) {
       case 'title':
         this.title.handleInput(button);
+        break;
+      case 'settings':
+        this.settings.handleInput(button, device);
         break;
       case 'result':
         this.result.handleInput(button);
@@ -158,6 +185,37 @@ export class App {
     }
   }
 
+  /** 最後に使ったデバイスが変わったら、表示中の操作案内の表記を切り替える */
+  private onDeviceChange(device: DeviceKind): void {
+    this.prompt.setDevice(device);
+    this.title.setDevice(device);
+    this.result.setDevice(device);
+    this.settings.setDevice(device);
+  }
+
+  /**
+   * パッドの接続・切断をログに出す（ゲーム中以外は Log が非表示なので console にも出す）。
+   * 新しく接続されたパッドがあれば、操作案内をそのパッドの表記に切り替える
+   */
+  private onPadsChange(pads: PadInfo[]): void {
+    const key = (p: PadInfo): string => `${p.index}:${p.id}`;
+    const before = new Set(this.pads.map(key));
+    const after = new Set(pads.map(key));
+    const connected = pads.filter((p) => !before.has(key(p)));
+    const lines = [
+      ...connected.map((p) => `${p.label} を接続しました`),
+      ...this.pads.filter((p) => !after.has(key(p))).map((p) => `${p.label} が切断されました`),
+    ];
+    this.pads = pads;
+    // 認識用の最初の 1 押しは入力にしないので、接続の時点で案内をパッド表記に切り替える
+    const latest = connected.at(-1);
+    if (latest) this.input.setActiveDevice(latest.kind);
+    for (const line of lines) {
+      console.info(`[input] ${line}`);
+      if (this.mode === 'game') this.log.push(line);
+    }
+  }
+
   /** 現在の phase に応じて、次の入力の案内を出す */
   private waitForInput(): void {
     const state = this.state;
@@ -168,8 +226,9 @@ export class App {
       case 'spin': {
         this.roulette.show();
         if (phase.purpose === 'stockChange') {
-          this.prompt.show('株価が動く！ Enter で株価ルーレットを回す', () =>
-            this.dispatch({ type: 'spin' }),
+          this.prompt.show(
+            (k) => `株価が動く！ ${k.confirm} で株価ルーレットを回す`,
+            () => this.dispatch({ type: 'spin' }),
           );
           return;
         }
@@ -185,7 +244,7 @@ export class App {
               ]
             : [];
         this.prompt.show(
-          `${player.name} の番: Enter でルーレットを回す`,
+          (k) => `${player.name} の番: ${k.confirm} でルーレットを回す`,
           (id) => {
             if (id.startsWith(CARD_PREFIX)) {
               this.dispatch({ type: 'useCard', cardId: id.slice(CARD_PREFIX.length) });
@@ -194,7 +253,7 @@ export class App {
             }
           },
           choices,
-          cards.length > 0 ? '←→ でルーレット／カードを切り替え' : '',
+          cards.length > 0 ? (k) => `${k.horizontal} でルーレット／カードを切り替え` : '',
         );
         return;
       }
@@ -205,8 +264,9 @@ export class App {
         return;
       case 'turnEnd':
         this.roulette.hide();
-        this.prompt.show(`${player.name} の番はおわり: Enter で次の人へ`, () =>
-          this.dispatch({ type: 'next' }),
+        this.prompt.show(
+          (k) => `${player.name} の番はおわり: ${k.confirm} で次の人へ`,
+          () => this.dispatch({ type: 'next' }),
         );
         return;
       case 'gameOver':

@@ -1,12 +1,15 @@
 // 結果画面。順位と資産内訳を表示する。
 import type { GameResult, GameState } from '../core/types.ts';
-import type { InputButton } from '../input/input.ts';
+import type { DeviceKind, InputButton } from '../input/input.ts';
 import { el, getElement } from './dom.ts';
 import { formatMoney } from './format.ts';
+import { keyLabels } from './hints.ts';
 
 export class ResultScreen {
   private readonly root = getElement('result');
   private onClose: (() => void) | null = null;
+  private device: DeviceKind = 'keyboard';
+  private hint: HTMLElement | null = null;
 
   show(state: GameState, result: GameResult, onClose: () => void): void {
     this.onClose = onClose;
@@ -47,8 +50,20 @@ export class ResultScreen {
     }
 
     const box = el('div', 'panel screen');
-    box.append(el('h2', '', '結果発表'), table, el('div', 'hint', 'Enter でタイトルへ'));
+    this.hint = el('div', 'hint');
+    this.renderHint();
+    box.append(el('h2', '', '結果発表'), table, this.hint);
     this.root.replaceChildren(box);
+  }
+
+  /** 操作案内のキー表記を切り替える */
+  setDevice(device: DeviceKind): void {
+    this.device = device;
+    this.renderHint();
+  }
+
+  private renderHint(): void {
+    if (this.hint) this.hint.textContent = `${keyLabels(this.device).confirm} でタイトルへ`;
   }
 
   hide(): void {

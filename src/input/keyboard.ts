@@ -26,7 +26,7 @@ export class KeyboardSource implements InputSource {
       e.preventDefault();
       // 決定・キャンセルの押しっぱなしによる連打は無視する（方向キーはリピート可）
       if (e.repeat && (button === 'confirm' || button === 'cancel')) return;
-      listener(button);
+      listener(button, 'keyboard');
     };
     this.target.addEventListener('keydown', onKeyDown);
     return () => this.target.removeEventListener('keydown', onKeyDown);

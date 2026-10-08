@@ -2,7 +2,11 @@
 
 export type InputButton = 'confirm' | 'cancel' | 'up' | 'down' | 'left' | 'right';
 
-export type InputListener = (button: InputButton) => void;
+/** 操作案内の表記を切り替えるためのデバイス種別 */
+export type DeviceKind = 'keyboard' | 'joycon' | 'gamepad';
+
+/** device は省略可（省略時はデバイス切り替えの判定に使わない） */
+export type InputListener = (button: InputButton, device?: DeviceKind) => void;
 
 /** 押下イベントを発行する入力デバイス */
 export interface InputSource {
@@ -16,13 +20,20 @@ export interface InputSource {
 /** 複数の InputSource を束ね、どれから押されても同じ抽象入力として配信する */
 export class InputHub {
   private readonly listeners = new Set<InputListener>();
+  private readonly deviceListeners = new Set<(device: DeviceKind) => void>();
   private readonly unsubscribers = new Map<InputSource, () => void>();
+  private active: DeviceKind = 'keyboard';
+
+  /** 最後に入力があったデバイス種別 */
+  get activeDevice(): DeviceKind {
+    return this.active;
+  }
 
   addSource(source: InputSource): void {
     if (this.unsubscribers.has(source)) return;
     this.unsubscribers.set(
       source,
-      source.subscribe((button) => this.emit(button)),
+      source.subscribe((button, device) => this.emit(button, device)),
     );
   }
 
@@ -42,7 +53,25 @@ export class InputHub {
     return () => this.listeners.delete(listener);
   }
 
-  private emit(button: InputButton): void {
-    for (const listener of [...this.listeners]) listener(button);
+  /** 最後に使われたデバイス種別が変わったときに呼ばれる */
+  onDeviceChange(listener: (device: DeviceKind) => void): () => void {
+    this.deviceListeners.add(listener);
+    return () => this.deviceListeners.delete(listener);
+  }
+
+  /**
+   * 入力が無くても使用中のデバイスを切り替える（例: パッドが接続された直後）。
+   * 同じ値なら何もしない
+   */
+  setActiveDevice(device: DeviceKind): void {
+    if (device === this.active) return;
+    this.active = device;
+    for (const listener of [...this.deviceListeners]) listener(device);
+  }
+
+  private emit(button: InputButton, device?: DeviceKind): void {
+    // 案内の表記を先に切り替えてから入力を配る（入力で出た新しい案内が正しい表記になるように）
+    if (device) this.setActiveDevice(device);
+    for (const listener of [...this.listeners]) listener(button, device);
   }
 }

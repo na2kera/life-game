@@ -189,8 +189,9 @@ body {
   color: var(--text-dim);
 }
 
-/* --- タイトル・結果（全面） --- */
+/* --- タイトル・設定・結果（全面） --- */
 #title,
+#settings,
 #result {
   position: absolute;
   inset: 0;
